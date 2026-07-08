@@ -83,6 +83,18 @@ class LLMCallLogger(BaseCallbackHandler):
 _llm_call_logger = LLMCallLogger()
 
 
+# Without an explicit timeout, ChatOpenAI falls back to the openai SDK's
+# default (600s), so a stall on the upstream proxy (observed: single calls
+# hanging 2+ minutes with 0% local CPU -- i.e. genuinely stuck waiting on the
+# network, not slow inference) blocks the whole graph for up to 10 minutes
+# with no feedback. 60s is generous for this pipeline's normal per-call
+# latency (typically 1-5s, worst observed non-stalled call ~30s) while still
+# failing fast enough to be noticeable. max_retries=2 gives a stalled call a
+# couple of fresh attempts rather than one long wait.
+LLM_TIMEOUT_SECONDS = 60
+LLM_MAX_RETRIES = 2
+
+
 @lru_cache(maxsize=4)
 def get_llm(temperature: float = 0.0) -> ChatOpenAI:
     return ChatOpenAI(
@@ -90,5 +102,7 @@ def get_llm(temperature: float = 0.0) -> ChatOpenAI:
         base_url=LLM_API_BASE,
         api_key=LLM_API_KEY,
         temperature=temperature,
+        timeout=LLM_TIMEOUT_SECONDS,
+        max_retries=LLM_MAX_RETRIES,
         callbacks=[_llm_call_logger],
     )

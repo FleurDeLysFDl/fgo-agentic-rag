@@ -6,11 +6,12 @@ Self-RAG subgraph (agent/subgraph.py) -> synthesize a final answer.
 Either stage can short-circuit straight to a clarifying question instead of
 an answer: resolve_question if a pronoun/reference can't be resolved even
 with history (or the question is missing essential scope), or
-solve_subquestions if a sub-question's structured_lookup matched more than
-one servant variant (see agent/subgraph.py). Callers don't need to branch on
-this -- result["final_answer"] is always the right thing to show the user;
-result["needs_clarification"] just tells the UI whether it's a question
-rather than an answer (e.g. to skip a "sources" section).
+solve_subquestions if a sub-question's retrieved documents disagree with
+each other on the fact being asked about (agent/subgraph.py's
+check_conflict). Callers don't need to branch on this -- result["final_answer"]
+is always the right thing to show the user; result["needs_clarification"]
+just tells the UI whether it's a question rather than an answer (e.g. to
+skip a "sources" section).
 
 Usage (CLI):
     python -m agent.graph "阿尔托莉雅和贞德的宝具阶级哪个更高？"

@@ -42,6 +42,30 @@ class ResolvedQuestion(BaseModel):
     )
 
 
+class ConflictCheck(BaseModel):
+    """Decide whether the retrieved documents disagree with each other on
+    the specific fact the question is asking about (e.g. different noble
+    phantasm ranks across servant variants that share a name) such that
+    answering confidently from all of them at once would blend or average
+    over a real distinction the user needs to pick between."""
+
+    has_conflict: bool = Field(
+        description=(
+            "True if two or more of the documents give mutually inconsistent "
+            "information that's directly relevant to answering the question "
+            "(not just different documents covering different topics)."
+        )
+    )
+    clarification_question: str = Field(
+        default="",
+        description=(
+            "If has_conflict, a short question (same language as the "
+            "original question) that names the conflicting values/sources "
+            "and asks the user which one they mean. Empty string otherwise."
+        ),
+    )
+
+
 class RouteQuery(BaseModel):
     """Decide whether a question should be answered from the structured
     servant database (exact game-mechanic facts) or the lore vector store

@@ -1,13 +1,18 @@
 """Single-hop Self-RAG-style subgraph: route -> retrieve/structured-lookup ->
-(retry with rewritten query if nothing came back) -> generate -> grade
-generation (hallucination + answer-quality) -> retry generate or retry
-retrieval if needed, else return.
+(retry with rewritten query if nothing came back) -> check_conflict -> generate
+-> grade generation (hallucination + answer-quality) -> retry generate or
+retry retrieval if needed, else return.
 
-If structured_lookup's servant name/class don't pin down a single row (e.g.
-"阿尔托莉雅的宝具是什么" with no class specified matches several playable
-forms), the subgraph short-circuits with needs_clarification=True/
-clarification_question instead of guessing or blending facts from multiple
-variants into one answer -- see structured_lookup_node.
+check_conflict runs whenever 2+ documents came back (from either route) and
+asks the LLM whether they actually disagree on the fact being asked about --
+e.g. "阿尔托莉雅的宝具是什么" pulling in several playable forms with
+different noble phantasms, or two lore passages giving different accounts of
+the same event. If so, the subgraph short-circuits with needs_clarification=
+True/clarification_question describing the conflict, instead of generate()
+blending/averaging over a distinction the user actually needs to pick
+between (observed before this existed: one answer stated a servant's noble
+phantasm rank as "C或EX，具体取决于形态" by mixing two different variants'
+data into one sentence).
 
 Retrieved/looked-up documents are NOT graded for relevance with a per-document
 LLM call -- that was the dominant cost in wall-clock latency (one sequential
@@ -38,6 +43,7 @@ from langgraph.graph import END, StateGraph
 from agent.llm import get_llm
 from agent.retriever_singleton import get_retriever
 from agent.schemas import (
+    ConflictCheck,
     GradeAnswer,
     GradeHallucination,
     RewrittenQuery,
@@ -116,27 +122,6 @@ def route_question(state: SubState) -> dict:
 
 def structured_lookup_node(state: SubState) -> dict:
     matches = lookup_servant(state["servant_name"], class_hint=state.get("class_hint") or None)
-
-    if len(matches) > 1:
-        # name_cn isn't unique across class-swap/costume variants (see
-        # lookup_servant's docstring) -- more than one match means the
-        # question's servant name/class don't pin down a single servant, so
-        # ask rather than silently answering for whichever row happened to
-        # come back first (or worse, mixing facts from multiple variants
-        # into one answer, as observed before this check existed).
-        variant_names = sorted({f"{m['name_cn']}（{m['class_name']}）" for m in matches})
-        clarification = (
-            f"「{state['servant_name']}」匹配到{len(variant_names)}个不同的从者形态，"
-            "请问具体是指哪一个？\n" + "\n".join(f"- {v}" for v in variant_names)
-        )
-        logger.info(
-            "structured_lookup: servant_name=%r class_hint=%r -> %d match(es), ambiguous -- asking for clarification",
-            state["servant_name"],
-            state.get("class_hint"),
-            len(matches),
-        )
-        return {"documents": [], "needs_clarification": True, "clarification_question": clarification}
-
     documents = [_format_structured_doc(m) for m in matches]
     logger.info(
         "structured_lookup: servant_name=%r class_hint=%r -> %d match(es)",
@@ -144,7 +129,7 @@ def structured_lookup_node(state: SubState) -> dict:
         state.get("class_hint"),
         len(matches),
     )
-    return {"documents": documents, "needs_clarification": False}
+    return {"documents": documents}
 
 
 def retrieve(state: SubState) -> dict:
@@ -176,10 +161,35 @@ def decide_to_generate(state: SubState) -> str:
     return "generate"
 
 
-def decide_after_structured_lookup(state: SubState) -> str:
-    if state.get("needs_clarification"):
-        return "clarify"
-    return decide_to_generate(state)
+def check_conflict(state: SubState) -> dict:
+    if len(state["documents"]) < 2:
+        return {"needs_clarification": False}
+
+    llm = get_llm().with_structured_output(ConflictCheck)
+    context = "\n\n---\n\n".join(f"[来源：{d['source']}]\n{d['text']}" for d in state["documents"])
+    result: ConflictCheck = llm.invoke(
+        [
+            (
+                "system",
+                "判断下面提供的多份资料中，是否存在针对这个问题相互矛盾/不一致的信息"
+                "（例如同一类事实在不同资料中给出了不同的数值或说法）。如果存在，"
+                "指出具体是什么信息冲突、涉及哪些来源，并提出一个简短的反问帮助确认"
+                "用户想问的是哪一个。",
+            ),
+            ("human", f"问题：{state['question']}\n\n资料：\n{context}"),
+        ]
+    )
+    if result.has_conflict:
+        logger.info(
+            "check_conflict: conflict detected among %d document(s) -- asking for clarification",
+            len(state["documents"]),
+        )
+        return {"needs_clarification": True, "clarification_question": result.clarification_question}
+    return {"needs_clarification": False}
+
+
+def decide_after_conflict_check(state: SubState) -> str:
+    return "clarify" if state.get("needs_clarification") else "generate"
 
 
 def transform_query(state: SubState) -> dict:
@@ -273,6 +283,7 @@ def build_subgraph():
     graph.add_node("structured_lookup", structured_lookup_node)
     graph.add_node("retrieve", retrieve)
     graph.add_node("transform_query", transform_query)
+    graph.add_node("check_conflict", check_conflict)
     graph.add_node("generate", generate)
     graph.add_node("increment_generate_retries", increment_generate_retries)
 
@@ -286,13 +297,16 @@ def build_subgraph():
     )
     graph.add_conditional_edges(
         "structured_lookup",
-        decide_after_structured_lookup,
-        {"generate": "generate", "transform_query": "transform_query", "clarify": END},
+        decide_to_generate,
+        {"generate": "check_conflict", "transform_query": "transform_query"},
     )
     graph.add_conditional_edges(
         "retrieve",
         decide_to_generate,
-        {"generate": "generate", "transform_query": "transform_query"},
+        {"generate": "check_conflict", "transform_query": "transform_query"},
+    )
+    graph.add_conditional_edges(
+        "check_conflict", decide_after_conflict_check, {"generate": "generate", "clarify": END}
     )
     # Always fall back to vectorstore search on retry: a failed structured
     # lookup (e.g. lore/flavor-text questions misrouted to "structured") has
