@@ -1,68 +1,87 @@
-# Benchmarks & engineering log
+# 评测数据与工程日志
 
-Concrete before/after numbers from debugging this system against real queries, not synthetic ones. Corpus: 4,033 records (391 servant profiles + 3,572 quest/story script chunks), Chinese/Japanese.
+这里记录的都是拿真实query（不是构造出来的合成数据）调试这套系统时得到的具体前后对比数字。语料库：4033条记录（391个从者资料页 + 3572个剧情/任务脚本片段），中日双语。
 
-## Retrieval quality: Recall@5
+## 检索质量：Recall@5
 
-Eval harness: [`scripts/eval_recall.py`](../scripts/eval_recall.py), 25 hand-written questions ([`eval/questions.json`](../eval/questions.json)) covering single-servant facts, cross-servant comparisons, and JP-exclusive lore not yet ported to the CN client. A hit = the expected source document appears in the reranked top 5.
+评测脚本：[`scripts/eval_recall.py`](../scripts/eval_recall.py)，25道手写题（[`eval/questions.json`](../eval/questions.json)），覆盖单从者事实、跨从者对比、以及国服还没实装的JP限定剧情。命中标准：期望的来源文档出现在重排后的top5里。
 
-| Stage | Recall@5 | Notes |
+| 阶段 | Recall@5 | 备注 |
 |---|---|---|
-| Baseline (reranker `max_length` uncapped) | *unmeasurable* | 20+ min per question; killed before completion (see latency section) |
-| `max_length=512` cap added | 92% (23/25) | fixed the latency, but truncation silently dropped one answer that was past the 512-token window |
-| + summary-based reranking for long candidates | **96% (24/25)** | long candidates reranked against their LLM-generated summary (already used for dense embedding) instead of a truncated raw-text slice; recovered the case above |
+| 基线（reranker `max_length` 无上限） | *跑不出来* | 单题20多分钟，没跑完就被杀掉了（详见下面延迟部分） |
+| 加上 `max_length=512` | 92%（23/25） | 延迟问题解决了，但截断悄悄漏掉了一个答案（正好落在512 token窗口之外） |
+| + 长候选改用摘要重排 | **96%（24/25）** | 长候选改成跟其LLM生成的摘要（已经在用于稠密向量embedding）做重排，而不是被截断的原文片段；把上面那条漏掉的答案捞了回来 |
 
-The one remaining miss is a same-event/different-chapter disambiguation the reranker genuinely can't resolve from the query alone (not a pipeline defect).
+剩下唯一一次未命中，是同一个活动下不同章节的消歧问题，reranker光靠query本身确实分不清楚（不是pipeline的缺陷）。
 
-## Reranker latency
+## Reranker延迟
 
-`bge-reranker-v2-m3`'s `CrossEncoder` falls back to the tokenizer's `model_max_length` (8192 for this model) if `max_length` isn't set explicitly. Candidate chunks in this corpus run up to ~37K characters (full quest scripts), so uncapped reranking was tokenizing every candidate pair to 8192 tokens — cross-encoder attention cost scales quadratically with sequence length, so this is ~256× the compute of a normal 512-token pass.
+`bge-reranker-v2-m3` 的 `CrossEncoder` 如果不显式设置 `max_length`，会用tokenizer的 `model_max_length`（这个模型是8192）。这个语料库里的候选文本块最长能到约3.7万字符（完整剧情脚本），所以不限制的话，每对候选都会被编码到8192 token——cross-encoder的attention计算量跟序列长度是平方关系，相当于普通512 token情况下约256倍的算力。
 
-| Config | Time for 2/25 eval questions |
+| 配置 | 跑完25题里的2题所需时间 |
 |---|---|
-| `max_length` uncapped | 20+ minutes (process killed) |
-| `max_length=512` | a few seconds |
+| `max_length` 无上限 | 20多分钟（进程被杀） |
+| `max_length=512` | 几秒钟 |
 
-## Multi-hop query LLM call count
+## 多跳查询的LLM调用次数
 
-Query: *"阿尔托莉雅和贞德的宝具阶级哪个更高？"* (a 3-sub-question comparison after decomposition).
+测试问题：*"阿尔托莉雅和贞德的宝具阶级哪个更高？"*（拆解后是3个子问题的对比）。
 
-| Change | LLM calls | Wall time |
+| 改动 | LLM调用次数 | 总耗时 |
 |---|---|---|
-| Baseline (`grade_documents`: 1 LLM call per retrieved candidate) | 54 | 246.0s |
-| `grade_documents` removed entirely (no relevance filter) | 25 | 249.4s* / 115.2s (clean run) |
-| Replaced with free score-gap cutoff (`_select_by_score_gap`, no LLM call) | 25 | 121.0s |
+| 基线（`grade_documents`：每个检索候选单独调一次LLM判断相关性） | 54 | 246.0秒 |
+| 完全去掉 `grade_documents`（不做相关性过滤） | 25 | 249.4秒* / 115.2秒（干净的一次） |
+| 换成免费的分数断层截取（`_select_by_score_gap`，不调LLM） | 25 | 121.0秒 |
 
-\* One run hit an anomalous 125s single-call stall on the upstream LLM proxy, unrelated to the code change — confirmed by a clean rerun at 115.2s. This also surfaced a missing request timeout on the LLM client (fixed: 60s timeout + 2 retries, see `agent/llm.py`).
+\* 有一次跑遇到了上游LLM代理的异常单次调用卡顿（125秒），跟代码改动无关——用一次干净的重跑（115.2秒）确认了这一点。这个发现也暴露了LLM客户端没设请求超时的问题（已修复：60秒超时+2次重试，见 `agent/llm.py`）。
 
-Removing per-document grading cut LLM calls by more than half without changing Recall@5, because the cross-encoder reranker's own score ordering is already a good relevance signal — the grading step was re-deriving information the pipeline already had.
+去掉逐文档打分把LLM调用数砍了一半多，且Recall@5没有下降——因为cross-encoder reranker自己的打分排序本身就是个不错的相关性信号，之前那个打分步骤其实是在重新推导pipeline里已经有的信息。
 
-## Silent top-5 retrieval cutoff
+## 静默的top-5检索截断
 
-`retrieve()` requested only `top_k=5` from the reranked candidate list before applying the score-gap cutoff, so the cutoff logic could never see (or recover) a genuine hit ranked 6th or lower.
+`retrieve()` 在应用分数断层截取之前，只向reranker请求了 `top_k=5` 个结果，导致断层截取逻辑根本没机会看到（更别说救回）排名第6或更靠后的真实命中。
 
-Concrete case — query *"美狄亚与伊阿宋之间的关系是什么？"*: the servant's own profile page (`美狄亚`) reranked at **0.8954, 6th place** — a 0.012 gap from 5th place (0.9076), nowhere near a real cliff — but was excluded purely by the top-5 slice. The real cliff in that candidate list was down at rank 13 (0.7211 → 0.5460, a 0.175 drop).
+具体案例——查询*"美狄亚与伊阿宋之间的关系是什么？"*：从者自己的资料页（`美狄亚`）重排分数为**0.8954，排第6名**——跟第5名（0.9076）只差0.012，压根算不上真正的断层——却单纯因为top-5截断被排除在外。这份候选列表里真正的断层其实在第13名之后（0.7211 → 0.5460，落差0.175）。
 
-Fix: `retrieve()` now requests the reranker's full candidate pool (`FUSED_TOP_K=20`) — free, since the reranker already scores all 20 regardless of what slice is requested back — and lets the score-gap cutoff make the real decision. Confirmed fix: the same query now returns the profile page correctly (rank 5, 0.9491).
+修复：`retrieve()` 现在请求reranker的完整候选池（`FUSED_TOP_K=20`）——这不花额外算力，因为reranker反正已经把这20个全部打过分了——然后让分数断层截取逻辑来做真正的决定。验证：同一个查询现在能正确返回那个资料页了（排第5，分数0.9491）。
 
-Trade-off: without an upper bound, a gradually-declining score curve (no sharp cliff) can keep most of the 20 candidates — observed one query keeping 17/20. Accepted as a known trade-off rather than adding an arbitrary ceiling back.
+代价：没有上限的情况下，如果分数曲线是渐进下降而非陡崖式下降，可能会保留掉20个候选里的大部分——实测有一次一个查询保留了17/20个。这个代价目前是接受的，没有加一个武断的上限回去。
 
-## Enumeration-style questions: top-k vs. exhaustive scan
+## 枚举类问题：top-k检索 vs 穷举扫描
 
-Top-k similarity search fundamentally cannot answer "list every quest/chunk mentioning X" — it returns whichever handful of records best match *this specific query's phrasing*, not every record containing the entity.
+Top-k相似度检索从根本上答不了"列出所有提到X的剧情/片段"这种问题——它只会返回跟*这一次具体措辞*最匹配的那一小撮记录，不是所有包含这个实体的记录。
 
-Concrete case — *"列出伊阿宋出场过的所有剧情章节标题"*, tested with two different phrasings:
+具体案例——*"列出伊阿宋出场过的所有剧情章节标题"*，用两种不同问法测试：
 
-| Phrasing | Records returned | Overlap between the two |
+| 问法 | 返回记录数 | 两次结果的重叠 |
 |---|---|---|
 | "伊阿宋的出场剧情是什么？" | 6 | 0 |
 | "列出伊阿宋的出场章节标题。" | 2 | 0 |
-| Exhaustive keyword scan (`enumerate_by_keyword`) | **130** | — |
+| 穷举关键词扫描（`enumerate_by_keyword`） | **130** | — |
 
-Fix: `decompose()` now classifies each sub-question's `query_type` (`standard` vs `enumerate`) at planning time; `enumerate` routes to a full-corpus substring scan (cheap — under a second over ~4,000 records) instead of top-k retrieval, returning a complete source list rather than a narrative synthesis (no LLM call needed).
+修复：`decompose()` 现在会在问题拆解阶段给每个子问题分类 `query_type`（`standard` 还是 `enumerate`）；`enumerate` 类型直接走全语料库子串扫描（便宜——4000条记录扫一遍不到一秒），而不是top-k检索，返回完整的来源列表而不是叙事式总结（不需要调LLM）。
 
-## Multi-turn memory & clarification
+## 多轮记忆与反问机制
 
-- **Pronoun resolution**: *"她的宝具是什么？"* with no prior context correctly triggers a clarifying question ("请问你指的是哪位从者？"); after the user specifies *"阿尔托莉雅·潘德拉贡(Lancer)"*, a follow-up *"她的宝具阶级是什么？"* correctly resolves "她" to that specific servant+class using conversation history, without re-asking.
-- **Conflict detection over guessing**: *"贞德的宝具阶级是什么？"* (ambiguous — matches both the Archer and Ruler variants, different noble phantasm ranks) triggers *"你想问的是贞德（archer）的宝具阶级A+，还是贞德（ruler）的宝具阶级A？"* — naming the actual conflicting values — instead of blending both variants' data into one answer (an earlier version did exactly that, producing "C或EX，具体取决于形态" by mixing two different servants' facts into one sentence).
-- **Bounded clarification**: capping `MAX_CLARIFICATION_ROUNDS=1` was necessary because the LLM does not reliably recognize "the user's short reply already answers my own clarifying question" — observed a case where the model re-asked an almost word-for-word identical question after the user answered "所有" to a choice-style clarifying question. A round limit that only forced resolution after 2+ rounds still let one redundant repeat through every time.
+- **代词消解**：*"她的宝具是什么？"* 在没有任何上文的情况下，正确触发了反问（"请问你指的是哪位从者？"）；用户给出*"阿尔托莉雅·潘德拉贡(Lancer)"*之后，追问*"她的宝具阶级是什么？"*能正确借助对话历史把"她"消解成那个具体的从者+职阶，不再重复反问。
+- **冲突检测优于瞎猜**：*"贞德的宝具阶级是什么？"*（有歧义——同时匹配Archer和Ruler两个变体，宝具阶级不同）会触发*"你想问的是贞德（archer）的宝具阶级A+，还是贞德（ruler）的宝具阶级A？"*——明确点出具体是哪两个数值冲突——而不是把两个变体的数据混进同一句话里（早期版本就是这么干的，混出了"C或EX，具体取决于形态"这种把两个不同从者的事实拼在一起的答案）。
+- **反问轮次有上限**：把 `MAX_CLARIFICATION_ROUNDS` 设为1是必要的，因为LLM并不能可靠地识别"用户这句简短的回复其实已经回答了我刚才的反问"——实测遇到过用户回答"所有"之后，模型又把几乎一模一样的问题重复问了一遍。轮次超过2才强制解决的方案，仍然会每次都放过一次这种多余的重复提问。
+- **`route` 字段过期**：structured查库没命中、回退到向量检索重试的时候，`state["route"]` 字段没有跟着更新，还残留着"structured"这个旧值，导致 `check_conflict`（本该只对structured路由生效）拿这个过期字段做判断——实测出现过一次Lancer职阶的技能问题被混进了Archer/Ruler/Alter等其他变体数据的情况。修复：让向量检索的fallback分支显式把 `route` 更新成"vectorstore"。
+
+## 对话记忆：有界 + 持久化
+
+早期版本的"记忆"就是前端 `st.session_state` 里的一个原始列表——历史随对话无限增长、每轮都要整段塞进prompt、只在浏览器会话内存在（刷新页面或重启进程就丢），而且只有 `resolve_question` 这一个预处理步骤能看到历史，`generate()`/`synthesize()` 这些真正产出答案的节点完全感知不到对话上下文。
+
+`agent/memory.py` 的 `ConversationMemory` 三点都解决了：
+
+| 验证项 | 结果 |
+|---|---|
+| 滑动窗口 + 增量摘要 | 窗口设为最近6轮（`WINDOW_TURNS`）；超出窗口的部分被压缩成一份摘要，且是增量更新（只把新滑出窗口的轮次并入已有摘要，不是每次都从头重新摘要全部历史）。实测：8轮对话后摘要正确覆盖最早2轮，窗口正确保留最近6轮；再加2轮后摘要增量更新，窗口大小不变。 |
+| 跨进程持久化 | 在一个Python进程里写入2轮对话，在完全独立的新进程里读取，内容完整一致——确认了SQLite持久化（`data/conversations.db`）在进程重启后依然有效，不再依赖 `st.session_state`。 |
+| 下游节点可见 | `generate()` 的prompt现在包含"对话历史（仅用于保持语气/避免重复，不要作为事实依据）"这一段，确认历史确实流到了生成答案的那一步，不只是停留在 `resolve_question` 这个预处理阶段。 |
+
+## REST API：按session_id区分的持久化对话
+
+`api.py`（FastAPI）把 `agent.graph.answer()` 包装成 `POST /chat`，用调用方传入的 `session_id` 区分独立对话——不同于 `app.py` 本地交互用的固定"default"会话，这样任意调用方都能用各自的id（用户id、聊天组件的session token等）维护自己独立、持久化的对话。
+
+由于是无状态API（后续请求可能落到不同的worker进程上），`clarification_streak`（反问连续轮次）不能再依赖前端那种进程内列表，而是改成从每一轮持久化的 `is_clarification` 标记里实时计算。端到端验证：同一个 `session_id` 下，第一次问反问、第二次仍未消歧、第三次借助持久化的轮次计数正确强制给出了答案而不是又反问一次——跟本地 `app.py` 版本的行为完全一致。
