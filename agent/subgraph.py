@@ -1,11 +1,23 @@
 """Single-hop Self-RAG-style subgraph: route -> retrieve/structured-lookup ->
-grade documents -> (retry with rewritten query if nothing relevant) -> generate
--> grade generation (hallucination + answer-quality) -> retry generate or
-retry retrieval if needed, else return.
+(retry with rewritten query if nothing came back) -> generate -> grade
+generation (hallucination + answer-quality) -> retry generate or retry
+retrieval if needed, else return.
+
+Retrieved/looked-up documents are NOT graded for relevance with a per-document
+LLM call -- that was the dominant cost in wall-clock latency (one sequential
+LLM round-trip per candidate, e.g. 10 calls for a 10-match structured lookup).
+Vector-retrieved candidates instead get a free relevance gate:
+_select_by_score_gap cuts the sorted candidate list at its steepest
+cross-encoder-score drop (always keeping at least MIN_KEPT_DOCUMENTS) before
+it ever reaches generate(), without an LLM call. structured_lookup has no
+such score (it's a name match, not a ranked search) so its candidates pass
+through unfiltered.
+Hallucination/answer-quality grading after generation is unaffected -- those
+are single calls regardless of candidate count.
 
 gpt-4o-mini has not been fine-tuned with literal Self-RAG reflection tokens,
-so each "reflection" judgment (retrieve-worthy? relevant? supported? useful?)
-is elicited via structured LLM output (agent/schemas.py) instead of special
+so each "reflection" judgment (retrieve-worthy? supported? useful?) is
+elicited via structured LLM output (agent/schemas.py) instead of special
 vocabulary tokens -- functionally equivalent for a general-purpose chat model.
 """
 
@@ -21,7 +33,6 @@ from agent.llm import get_llm
 from agent.retriever_singleton import get_retriever
 from agent.schemas import (
     GradeAnswer,
-    GradeDocument,
     GradeHallucination,
     RewrittenQuery,
     RouteQuery,
@@ -33,6 +44,29 @@ logger = logging.getLogger(__name__)
 
 MAX_RETRIEVE_RETRIES = 2
 MAX_GENERATE_RETRIES = 2
+# With per-document LLM grading removed, this is the only remaining relevance
+# gate on vector-retrieved candidates. A fixed score cutoff doesn't fit the
+# data: the gap between "actually relevant" and "noise" candidates is real
+# (e.g. observed rank-1/2 hits at 0.98/0.66 next to rank-3+ noise at
+# 0.02/0.004/0.003) but its absolute position moves per query, so instead of
+# a fixed threshold this cuts at the single steepest score drop in the sorted
+# list (see _select_by_score_gap) -- wherever the biggest cliff actually is
+# for that query -- while always keeping at least MIN_KEPT_DOCUMENTS so a
+# query with no sharp cliff (every candidate plausibly relevant) doesn't get
+# left with just one.
+MIN_KEPT_DOCUMENTS = 2
+
+
+def _select_by_score_gap(results: list[dict], min_keep: int = MIN_KEPT_DOCUMENTS) -> list[dict]:
+    """Keep the top-scoring results up through the steepest drop in
+    consecutive rerank_score values (results are already sorted descending),
+    always keeping at least min_keep regardless of where that drop falls."""
+    if len(results) <= min_keep:
+        return results
+    scores = [r["rerank_score"] for r in results]
+    gaps = [scores[i] - scores[i + 1] for i in range(len(scores) - 1)]
+    cliff = max(range(len(gaps)), key=lambda i: gaps[i]) + 1  # keep up through the biggest drop
+    return results[: max(cliff, min_keep)]
 
 
 def _format_structured_doc(servant: dict) -> dict:
@@ -89,35 +123,16 @@ def structured_lookup_node(state: SubState) -> dict:
 def retrieve(state: SubState) -> dict:
     retriever = get_retriever()
     results = retriever.query(state["question"], top_k=5)
-    documents = [{"text": r["text"], "source": r["source"]} for r in results]
+    kept = _select_by_score_gap(results)
+    documents = [{"text": r["text"], "source": r["source"]} for r in kept]
     logger.info(
-        "retrieve: query=%r -> %d result(s): %s",
+        "retrieve: query=%r -> %d/%d result(s) kept up to score cliff: %s",
         state["question"],
         len(documents),
-        [d["source"] for d in documents],
+        len(results),
+        [(d["source"], round(r["rerank_score"], 4)) for d, r in zip(documents, kept)],
     )
     return {"documents": documents}
-
-
-def grade_documents(state: SubState) -> dict:
-    llm = get_llm().with_structured_output(GradeDocument)
-    relevant = []
-    for doc in state["documents"]:
-        result: GradeDocument = llm.invoke(
-            [
-                ("system", "判断以下资料是否与问题相关，只回答yes或no。"),
-                ("human", f"问题：{state['question']}\n\n资料：{doc['text']}"),
-            ]
-        )
-        if result.binary_score == "yes":
-            relevant.append(doc)
-    logger.info(
-        "grade_documents: %d/%d document(s) judged relevant (kept: %s)",
-        len(relevant),
-        len(state["documents"]),
-        [d["source"] for d in relevant],
-    )
-    return {"documents": relevant}
 
 
 def decide_to_generate(state: SubState) -> str:
@@ -224,7 +239,6 @@ def build_subgraph():
     graph.add_node("route_question", route_question)
     graph.add_node("structured_lookup", structured_lookup_node)
     graph.add_node("retrieve", retrieve)
-    graph.add_node("grade_documents", grade_documents)
     graph.add_node("transform_query", transform_query)
     graph.add_node("generate", generate)
     graph.add_node("increment_generate_retries", increment_generate_retries)
@@ -237,11 +251,13 @@ def build_subgraph():
     graph.add_conditional_edges(
         "route_question", route_branch, {"structured_lookup": "structured_lookup", "retrieve": "retrieve"}
     )
-    graph.add_edge("structured_lookup", "grade_documents")
-    graph.add_edge("retrieve", "grade_documents")
-
     graph.add_conditional_edges(
-        "grade_documents",
+        "structured_lookup",
+        decide_to_generate,
+        {"generate": "generate", "transform_query": "transform_query"},
+    )
+    graph.add_conditional_edges(
+        "retrieve",
         decide_to_generate,
         {"generate": "generate", "transform_query": "transform_query"},
     )

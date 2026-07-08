@@ -53,12 +53,6 @@ class DecomposeQuery(BaseModel):
     )
 
 
-class GradeDocument(BaseModel):
-    binary_score: Literal["yes", "no"] = Field(
-        description="'yes' if the document/fact is relevant to answering the question, else 'no'."
-    )
-
-
 class GradeHallucination(BaseModel):
     binary_score: Literal["yes", "no"] = Field(
         description=(
