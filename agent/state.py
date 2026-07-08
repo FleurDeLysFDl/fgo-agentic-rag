@@ -8,7 +8,18 @@ from typing import TypedDict
 # further, so the two clarification gates can keep firing indefinitely with
 # the user never getting an actual answer (observed: 8 rounds of narrowing
 # "情感" -> "情感深度" -> "谁对谁的情感" with no answer ever generated).
-MAX_CLARIFICATION_ROUNDS = 2
+#
+# Set to 1 (force resolution starting on the very next turn after any single
+# clarification), not higher: prompting the model to recognize "the user's
+# short reply already answers my own clarifying question" and resolve
+# instead of asking again was tried and is unreliable (observed: gpt-4o-mini
+# re-asked an almost word-for-word identical question after the user
+# answered "所有" to "全部版本还是特定版本？"). A round-limit that only
+# kicks in on round 2+ still lets one redundant repeat like that through
+# every time; capping at 1 removes the model's ability to ask a second
+# clarifying question at all, trading "occasionally answers a slightly
+# broader question than intended" for "never loops or repeats itself."
+MAX_CLARIFICATION_ROUNDS = 1
 
 
 class Document(TypedDict):
