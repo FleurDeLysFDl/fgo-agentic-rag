@@ -13,6 +13,13 @@ is always the right thing to show the user; result["needs_clarification"]
 just tells the UI whether it's a question rather than an answer (e.g. to
 skip a "sources" section).
 
+Callers should pass clarification_rounds = the number of consecutive
+assistant turns that were clarification-only (no real answer) so far in
+this conversation. Once that hits MAX_CLARIFICATION_ROUNDS (agent/state.py),
+resolve_question stops asking and commits to a best-effort interpretation,
+guaranteeing the conversation converges on an answer instead of narrowing
+forever.
+
 Usage (CLI):
     python -m agent.graph "阿尔托莉雅和贞德的宝具阶级哪个更高？"
 """
@@ -28,7 +35,7 @@ from langgraph.graph import END, StateGraph
 
 from agent.llm import get_llm
 from agent.schemas import DecomposeQuery, ResolvedQuestion
-from agent.state import GraphState, Turn
+from agent.state import MAX_CLARIFICATION_ROUNDS, GraphState, Turn
 from agent.subgraph import build_subgraph
 
 logger = logging.getLogger(__name__)
@@ -48,6 +55,33 @@ def resolve_question(state: GraphState) -> dict:
     history_text = "\n".join(
         f"{'用户' if turn['role'] == 'user' else '助手'}：{turn['content']}" for turn in history
     )
+    clarification_rounds = state.get("clarification_rounds", 0)
+
+    if clarification_rounds >= MAX_CLARIFICATION_ROUNDS:
+        # Already asked this many rounds without landing on an answer -- an
+        # open-ended question can always be narrowed further, so without a
+        # hard stop this can loop indefinitely (observed: 8 rounds narrowing
+        # a relationship question with no answer ever generated). Force a
+        # best-effort self-contained question instead of asking again.
+        result = get_llm().invoke(
+            [
+                (
+                    "system",
+                    "已经反问用户好几轮但还没有给出实际回答。请结合完整对话历史和用户"
+                    "刚才这句话，直接给出一个自包含、消解了所有代词/指代的问题，不要再"
+                    "反问——用你能想到的最合理解读。只输出改写后的问题本身，不要输出多余内容。",
+                ),
+                ("human", f"对话历史：\n{history_text or '（无历史）'}\n\n当前这句话：{state['question']}"),
+            ]
+        )
+        resolved = result.content.strip() or state["question"]
+        logger.info(
+            "resolve_question: clarification_rounds=%d >= max, forcing resolution -> %r",
+            clarification_rounds,
+            resolved,
+        )
+        return {"needs_clarification": False, "question": resolved}
+
     llm = get_llm().with_structured_output(ResolvedQuestion)
     result: ResolvedQuestion = llm.invoke(
         [
@@ -122,6 +156,7 @@ def solve_subquestions(state: GraphState) -> dict:
             "generate_retries": 0,
             "needs_clarification": False,
             "clarification_question": "",
+            "clarification_rounds": state.get("clarification_rounds", 0),
         }
         result = subgraph.invoke(initial_state)
         elapsed = time.perf_counter() - t0
@@ -212,13 +247,19 @@ def build_graph():
     return graph.compile()
 
 
-def answer(question: str, history: list[Turn] | None = None) -> dict:
+def answer(question: str, history: list[Turn] | None = None, clarification_rounds: int = 0) -> dict:
     t0 = time.perf_counter()
-    logger.info("answer: question=%r history_len=%d", question, len(history or []))
+    logger.info(
+        "answer: question=%r history_len=%d clarification_rounds=%d",
+        question,
+        len(history or []),
+        clarification_rounds,
+    )
     graph = build_graph()
     initial_state: GraphState = {
         "question": question,
         "history": history or [],
+        "clarification_rounds": clarification_rounds,
         "needs_clarification": False,
         "clarification_question": "",
         "sub_questions": [],

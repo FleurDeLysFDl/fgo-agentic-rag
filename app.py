@@ -14,18 +14,28 @@ the next turn continues the same conversation.
 
 Pipeline trace (routing decisions, retrieval hit counts, grading judgments,
 retries, timings) is printed to the console/terminal running `streamlit run`
-via the `agent` logger -- check that terminal (or `preview_logs` if launched
-through the preview tool) to see what happened during a query.
+via the `agent` logger, AND mirrored to .tmp/streamlit_app.log -- the
+terminal is only readable live (nothing to inspect after the fact if the
+window isn't watched at the time), so the file exists for post-hoc
+debugging of a session from its transcript.
 """
 
 import logging
+from pathlib import Path
 
 import streamlit as st
+
+LOG_PATH = Path(__file__).resolve().parent / ".tmp" / "streamlit_app.log"
+LOG_PATH.parent.mkdir(exist_ok=True)
 
 # Keep third-party libraries quiet (httpx/urllib3/sentence_transformers etc.
 # default to WARNING via basicConfig) but surface our own agent.* pipeline
 # trace at INFO so routing/retrieval/grading decisions are visible per query.
-logging.basicConfig(level=logging.WARNING, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+logging.basicConfig(
+    level=logging.WARNING,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    handlers=[logging.StreamHandler(), logging.FileHandler(LOG_PATH, encoding="utf-8")],
+)
 logging.getLogger("agent").setLevel(logging.INFO)
 
 from agent.graph import answer
@@ -46,6 +56,21 @@ if st.button("清空对话"):
     st.session_state.history = []
     st.session_state.turn_details = []
     st.rerun()
+
+
+def clarification_streak() -> int:
+    """How many trailing assistant turns in a row were clarification-only
+    (turn_details is None), i.e. asked without ever landing on a real answer.
+    Passed to answer() so it knows when to stop asking and commit to a
+    best-effort interpretation instead (agent.state.MAX_CLARIFICATION_ROUNDS)."""
+    streak = 0
+    for turn, details in zip(reversed(st.session_state.history), reversed(st.session_state.turn_details)):
+        if turn["role"] != "assistant":
+            continue
+        if details is not None:
+            break
+        streak += 1
+    return streak
 
 
 def render_details(details: dict) -> None:
@@ -85,7 +110,15 @@ if question:
         with st.spinner("检索并生成回答中..."):
             # history excludes the question just appended above -- it's the
             # prior turns the agent uses to resolve references in `question`.
-            result = answer(question, history=st.session_state.history[:-1])
+            # clarification_streak() is computed before that append too (it
+            # walks st.session_state.history/turn_details, both already
+            # updated above) -- fine either way since the just-appended user
+            # turn is skipped by the role check inside it.
+            result = answer(
+                question,
+                history=st.session_state.history[:-1],
+                clarification_rounds=clarification_streak(),
+            )
         st.write(result["final_answer"])
 
         details = None

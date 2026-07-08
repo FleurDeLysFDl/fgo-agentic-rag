@@ -3,16 +3,23 @@
 -> grade generation (hallucination + answer-quality) -> retry generate or
 retry retrieval if needed, else return.
 
-check_conflict runs whenever 2+ documents came back (from either route) and
-asks the LLM whether they actually disagree on the fact being asked about --
-e.g. "阿尔托莉雅的宝具是什么" pulling in several playable forms with
-different noble phantasms, or two lore passages giving different accounts of
-the same event. If so, the subgraph short-circuits with needs_clarification=
-True/clarification_question describing the conflict, instead of generate()
-blending/averaging over a distinction the user actually needs to pick
-between (observed before this existed: one answer stated a servant's noble
-phantasm rank as "C或EX，具体取决于形态" by mixing two different variants'
-data into one sentence).
+check_conflict runs whenever 2+ documents came back from the structured
+route and asks the LLM whether they actually disagree on the fact being
+asked about -- e.g. "阿尔托莉雅的宝具是什么" pulling in several playable
+forms with different noble phantasms. If so, the subgraph short-circuits
+with needs_clarification=True/clarification_question describing the
+conflict, instead of generate() blending/averaging over a distinction the
+user actually needs to pick between (observed before this existed: one
+answer stated a servant's noble phantasm rank as "C或EX，具体取决于形态" by
+mixing two different variants' data into one sentence). It's intentionally
+NOT applied to the vectorstore route: lore/narrative passages routinely
+differ in tone or emphasis without truly contradicting each other, and
+treating that as a conflict to resolve blocked perfectly answerable
+open-ended questions (observed: an infinite clarification loop on a
+relationship/lore question, narrowing forever without ever answering). Once
+clarification_rounds reaches MAX_CLARIFICATION_ROUNDS (agent/state.py) the
+check is skipped outright and generate() answers from whatever documents it
+has, guaranteeing the loop terminates.
 
 Retrieved/looked-up documents are NOT graded for relevance with a per-document
 LLM call -- that was the dominant cost in wall-clock latency (one sequential
@@ -49,8 +56,9 @@ from agent.schemas import (
     RewrittenQuery,
     RouteQuery,
 )
-from agent.state import SubState
+from agent.state import MAX_CLARIFICATION_ROUNDS, SubState
 from agent.structured_lookup import lookup_servant
+from retrieval import FUSED_TOP_K
 
 logger = logging.getLogger(__name__)
 
@@ -67,6 +75,16 @@ MAX_GENERATE_RETRIES = 2
 # query with no sharp cliff (every candidate plausibly relevant) doesn't get
 # left with just one.
 MIN_KEPT_DOCUMENTS = 2
+# retrieve() asks for the reranker's full candidate pool (not just the top 5)
+# -- the reranker already scores all FUSED_TOP_K candidates internally
+# regardless of what top_k is requested back, so this costs nothing extra,
+# but it matters: a hard top_k=5 slice was cutting the list before
+# _select_by_score_gap ever got to look past rank 5, silently dropping
+# real hits ranked 6+ even when there was no actual cliff there (observed:
+# a servant's own profile page scored 0.8954 at rank 6, a 0.012 gap from
+# rank 5's 0.9076 -- nowhere near a cliff -- purely because top_k=5 excluded
+# it from consideration; the real cliff in that query was down at rank 13).
+RETRIEVE_TOP_K = FUSED_TOP_K
 
 
 def _select_by_score_gap(results: list[dict], min_keep: int = MIN_KEPT_DOCUMENTS) -> list[dict]:
@@ -134,7 +152,7 @@ def structured_lookup_node(state: SubState) -> dict:
 
 def retrieve(state: SubState) -> dict:
     retriever = get_retriever()
-    results = retriever.query(state["question"], top_k=5)
+    results = retriever.query(state["question"], top_k=RETRIEVE_TOP_K)
     kept = _select_by_score_gap(results)
     documents = [{"text": r["text"], "source": r["source"]} for r in kept]
     logger.info(
@@ -162,7 +180,18 @@ def decide_to_generate(state: SubState) -> str:
 
 
 def check_conflict(state: SubState) -> dict:
-    if len(state["documents"]) < 2:
+    # Restricted to the structured (game-mechanic-fact) route: lore/narrative
+    # documents from the vectorstore route routinely differ in tone or
+    # emphasis without actually contradicting each other (e.g. one passage
+    # stressing affection, another resentment, in the same relationship) --
+    # treating that as a conflict to resolve before answering blocks
+    # perfectly answerable open-ended questions instead of just letting
+    # generate() synthesize the nuance into the answer, which is what a lore
+    # Q&A should do anyway.
+    if state["route"] != "structured" or len(state["documents"]) < 2:
+        return {"needs_clarification": False}
+    if state.get("clarification_rounds", 0) >= MAX_CLARIFICATION_ROUNDS:
+        logger.info("check_conflict: clarification_rounds exhausted, skipping check and answering from all documents")
         return {"needs_clarification": False}
 
     llm = get_llm().with_structured_output(ConflictCheck)
@@ -341,5 +370,6 @@ def run_single_hop(question: str) -> dict:
         "generate_retries": 0,
         "needs_clarification": False,
         "clarification_question": "",
+        "clarification_rounds": 0,
     }
     return subgraph.invoke(initial_state)
