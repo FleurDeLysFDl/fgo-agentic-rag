@@ -8,6 +8,40 @@ from typing import Literal
 from pydantic import BaseModel, Field
 
 
+class ResolvedQuestion(BaseModel):
+    """Decide whether the current question is answerable on its own (after
+    resolving any pronouns/references against conversation history) or is
+    missing information even the history can't supply."""
+
+    needs_clarification: bool = Field(
+        description=(
+            "True if the question can't be understood/answered even "
+            "considering conversation history -- e.g. a pronoun ('她'/'他'/"
+            "'这个从者') with no prior turn establishing who it refers to, "
+            "or the question is missing an essential entity/scope."
+        )
+    )
+    clarification_question: str = Field(
+        default="",
+        description=(
+            "If needs_clarification, a short natural-language question asking "
+            "the user for the missing information (same language as the "
+            "original question). Empty string otherwise."
+        ),
+    )
+    resolved_question: str = Field(
+        default="",
+        description=(
+            "If NOT needs_clarification, the question rewritten to be fully "
+            "self-contained, using conversation history to resolve pronouns/"
+            "references (e.g. '她的宝具是什么' -> '阿尔托莉雅的宝具是什么' if "
+            "阿尔托莉雅 was the servant just discussed). If the question is "
+            "already self-contained, return it unchanged. Empty string if "
+            "needs_clarification."
+        ),
+    )
+
+
 class RouteQuery(BaseModel):
     """Decide whether a question should be answered from the structured
     servant database (exact game-mechanic facts) or the lore vector store

@@ -3,6 +3,12 @@
 generation (hallucination + answer-quality) -> retry generate or retry
 retrieval if needed, else return.
 
+If structured_lookup's servant name/class don't pin down a single row (e.g.
+"阿尔托莉雅的宝具是什么" with no class specified matches several playable
+forms), the subgraph short-circuits with needs_clarification=True/
+clarification_question instead of guessing or blending facts from multiple
+variants into one answer -- see structured_lookup_node.
+
 Retrieved/looked-up documents are NOT graded for relevance with a per-document
 LLM call -- that was the dominant cost in wall-clock latency (one sequential
 LLM round-trip per candidate, e.g. 10 calls for a 10-match structured lookup).
@@ -110,6 +116,27 @@ def route_question(state: SubState) -> dict:
 
 def structured_lookup_node(state: SubState) -> dict:
     matches = lookup_servant(state["servant_name"], class_hint=state.get("class_hint") or None)
+
+    if len(matches) > 1:
+        # name_cn isn't unique across class-swap/costume variants (see
+        # lookup_servant's docstring) -- more than one match means the
+        # question's servant name/class don't pin down a single servant, so
+        # ask rather than silently answering for whichever row happened to
+        # come back first (or worse, mixing facts from multiple variants
+        # into one answer, as observed before this check existed).
+        variant_names = sorted({f"{m['name_cn']}（{m['class_name']}）" for m in matches})
+        clarification = (
+            f"「{state['servant_name']}」匹配到{len(variant_names)}个不同的从者形态，"
+            "请问具体是指哪一个？\n" + "\n".join(f"- {v}" for v in variant_names)
+        )
+        logger.info(
+            "structured_lookup: servant_name=%r class_hint=%r -> %d match(es), ambiguous -- asking for clarification",
+            state["servant_name"],
+            state.get("class_hint"),
+            len(matches),
+        )
+        return {"documents": [], "needs_clarification": True, "clarification_question": clarification}
+
     documents = [_format_structured_doc(m) for m in matches]
     logger.info(
         "structured_lookup: servant_name=%r class_hint=%r -> %d match(es)",
@@ -117,7 +144,7 @@ def structured_lookup_node(state: SubState) -> dict:
         state.get("class_hint"),
         len(matches),
     )
-    return {"documents": documents}
+    return {"documents": documents, "needs_clarification": False}
 
 
 def retrieve(state: SubState) -> dict:
@@ -147,6 +174,12 @@ def decide_to_generate(state: SubState) -> str:
         return "transform_query"
     logger.info("decide_to_generate: no relevant docs and retries exhausted, generating anyway")
     return "generate"
+
+
+def decide_after_structured_lookup(state: SubState) -> str:
+    if state.get("needs_clarification"):
+        return "clarify"
+    return decide_to_generate(state)
 
 
 def transform_query(state: SubState) -> dict:
@@ -253,8 +286,8 @@ def build_subgraph():
     )
     graph.add_conditional_edges(
         "structured_lookup",
-        decide_to_generate,
-        {"generate": "generate", "transform_query": "transform_query"},
+        decide_after_structured_lookup,
+        {"generate": "generate", "transform_query": "transform_query", "clarify": END},
     )
     graph.add_conditional_edges(
         "retrieve",
@@ -292,5 +325,7 @@ def run_single_hop(question: str) -> dict:
         "generation": "",
         "retrieve_retries": 0,
         "generate_retries": 0,
+        "needs_clarification": False,
+        "clarification_question": "",
     }
     return subgraph.invoke(initial_state)
