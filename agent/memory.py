@@ -60,10 +60,16 @@ def _connect() -> sqlite3.Connection:
             role TEXT NOT NULL,
             content TEXT NOT NULL,
             created_at REAL NOT NULL,
+            is_clarification INTEGER NOT NULL DEFAULT 0,
             PRIMARY KEY (session_id, turn_index)
         )
         """
     )
+    try:
+        # Migration for DBs created before is_clarification existed.
+        conn.execute("ALTER TABLE turns ADD COLUMN is_clarification INTEGER NOT NULL DEFAULT 0")
+    except sqlite3.OperationalError:
+        pass  # column already exists
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS summaries (
@@ -95,7 +101,7 @@ class ConversationMemory:
         finally:
             conn.close()
 
-    def append_turn(self, role: str, content: str) -> None:
+    def append_turn(self, role: str, content: str, is_clarification: bool = False) -> None:
         conn = _connect()
         try:
             next_index = conn.execute(
@@ -103,12 +109,38 @@ class ConversationMemory:
                 (self.session_id,),
             ).fetchone()[0]
             conn.execute(
-                "INSERT INTO turns (session_id, turn_index, role, content, created_at) VALUES (?, ?, ?, ?, ?)",
-                (self.session_id, next_index, role, content, time.time()),
+                "INSERT INTO turns (session_id, turn_index, role, content, created_at, is_clarification) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (self.session_id, next_index, role, content, time.time(), int(is_clarification)),
             )
             conn.commit()
         finally:
             conn.close()
+
+    def clarification_streak(self) -> int:
+        """How many trailing assistant turns in a row were clarification-only
+        (asked without ever landing on a real answer) -- persisted per-turn
+        (unlike app.py's old session_state-only tracking) so this is correct
+        even from a fresh process, e.g. a stateless API request handled by a
+        different worker than the one that asked. Passed to answer() so it
+        knows when to stop asking and commit to a best-effort interpretation
+        (agent.state.MAX_CLARIFICATION_ROUNDS)."""
+        conn = _connect()
+        try:
+            rows = conn.execute(
+                "SELECT role, is_clarification FROM turns WHERE session_id = ? ORDER BY turn_index DESC",
+                (self.session_id,),
+            ).fetchall()
+        finally:
+            conn.close()
+        streak = 0
+        for role, is_clarification in rows:
+            if role != "assistant":
+                continue
+            if not is_clarification:
+                break
+            streak += 1
+        return streak
 
     def clear(self) -> None:
         conn = _connect()

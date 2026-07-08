@@ -76,21 +76,6 @@ if st.button("清空对话"):
     st.rerun()
 
 
-def clarification_streak(history: list[dict], turn_details: list[dict | None]) -> int:
-    """How many trailing assistant turns in a row were clarification-only
-    (details is None), i.e. asked without ever landing on a real answer.
-    Passed to answer() so it knows when to stop asking and commit to a
-    best-effort interpretation instead (agent.state.MAX_CLARIFICATION_ROUNDS)."""
-    streak = 0
-    for turn, details in zip(reversed(history), reversed(turn_details)):
-        if turn["role"] != "assistant":
-            continue
-        if details is not None:
-            break
-        streak += 1
-    return streak
-
-
 def render_details(details: dict) -> None:
     if len(details["sub_questions"]) > 1:
         st.markdown("**问题拆解：**")
@@ -120,7 +105,7 @@ for i, turn in enumerate(history):
 
 question = st.chat_input("输入关于FGO从者的问题，可以是追问（例如“她的宝具是什么”）")
 if question:
-    streak = clarification_streak(history, st.session_state.turn_details)
+    streak = memory.clarification_streak()
     # get_context() BEFORE appending the current question -- it's the prior
     # turns the agent uses to resolve references in `question`, not
     # including `question` itself.
@@ -150,5 +135,7 @@ if question:
             }
             render_details(details)
 
-    memory.append_turn("assistant", result["final_answer"])
+    memory.append_turn(
+        "assistant", result["final_answer"], is_clarification=result["needs_clarification"]
+    )
     st.session_state.turn_details.append(details)

@@ -25,6 +25,11 @@ agent = [
 eval = [
     "ragas>=0.1",
 ]
+api = [
+    "fastapi>=0.110",
+    "uvicorn>=0.29",
+]
+ui = ["streamlit>=1.30"]
 dev = ["pytest"]
 
 [tool.pytest.ini_options]
