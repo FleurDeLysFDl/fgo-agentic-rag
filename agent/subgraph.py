@@ -238,6 +238,19 @@ def transform_query(state: SubState) -> dict:
     return {
         "question": result.better_question,
         "retrieve_retries": state["retrieve_retries"] + 1,
+        # transform_query always leads to retrieve() next (graph.add_edge
+        # below), never back to structured_lookup -- so state["route"] must
+        # be updated here too, or it's left stale as "structured" from the
+        # original routing decision even after a structured-lookup miss
+        # fell back to vectorstore search. That staleness let check_conflict
+        # (scoped to the structured route only) either wrongly run its
+        # conflict check against narrative vectorstore documents, or wrongly
+        # skip it and blend facts from multiple servant variants into one
+        # answer (observed: a Lancer-specific skill question answered with
+        # skills from Archer/Ruler/Alter variants mixed in, after a
+        # structured lookup with an over-specific name fell back to
+        # vectorstore).
+        "route": "vectorstore",
     }
 
 
