@@ -1,0 +1,32 @@
+[project]
+name = "fgo-agentic-rag"
+version = "0.1.0"
+description = "Agentic RAG over FGO structured (Atlas Academy) and unstructured (Mooncell wiki) data: multi-hop query decomposition, adaptive retrieval routing, self-correction, RAGAS evaluation."
+requires-python = ">=3.10"
+dependencies = [
+    "requests>=2.31",
+    "python-dotenv>=1.0",
+    "mwparserfromhell>=0.6",
+    "tqdm>=4.66",
+]
+
+[project.optional-dependencies]
+retrieval = [
+    "qdrant-client>=1.9",
+    "rank-bm25>=0.2.2",
+    "sentence-transformers>=3.0",
+    "FlagEmbedding>=1.2",
+]
+agent = [
+    "langgraph>=0.1",
+    "langchain-core>=0.2",
+    "langchain-openai>=0.1",
+]
+eval = [
+    "ragas>=0.1",
+]
+dev = ["pytest"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]

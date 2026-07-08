@@ -1,0 +1,17 @@
+__pycache__/
+*.pyc
+.venv/
+.env
+data/raw/
+data/wiki_raw/
+data/quest_raw/
+data/servants.db
+data/corpus/
+data/summary_cache.jsonl
+chroma_db/
+qdrant_storage/
+data/qdrant_local/
+data/bm25_index.pkl
+chat_history/
+.tmp/
+.claude/
