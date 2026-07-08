@@ -20,6 +20,14 @@ resolve_question stops asking and commits to a best-effort interpretation,
 guaranteeing the conversation converges on an answer instead of narrowing
 forever.
 
+decompose also assigns each sub-question a query_type (agent/schemas.py's
+SubQuestionPlan): 'enumerate' routes straight to an exhaustive keyword scan
+(solve_enumerate_subquestion) instead of the Self-RAG subgraph's top-K
+retrieval, for "list every X mentioning Y" questions where top-K search
+would only surface a handful of matches for this specific phrasing and miss
+most real occurrences -- top-K similarity search and "find every occurrence"
+are fundamentally different operations, not a matter of tuning k.
+
 Usage (CLI):
     python -m agent.graph "阿尔托莉雅和贞德的宝具阶级哪个更高？"
 """
@@ -34,8 +42,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from langgraph.graph import END, StateGraph
 
 from agent.llm import get_llm
-from agent.schemas import DecomposeQuery, ResolvedQuestion
-from agent.state import MAX_CLARIFICATION_ROUNDS, GraphState, Turn
+from agent.retriever_singleton import get_retriever
+from agent.schemas import DecomposeQuery, ResolvedQuestion, SubQuestionPlan as SubQuestionPlanSchema
+from agent.state import MAX_CLARIFICATION_ROUNDS, GraphState, SubQuestionPlan, Turn
 from agent.subgraph import build_subgraph
 
 logger = logging.getLogger(__name__)
@@ -123,7 +132,11 @@ def decompose(state: GraphState) -> dict:
                 "system",
                 "判断这个关于FGO（Fate/Grand Order）从者的问题是否需要拆解为多个"
                 "独立的单跳子问题才能完整回答（例如涉及多个从者，或需要分别查询"
-                "再比较/组合的情况）。如果不需要拆解，返回只包含原问题的列表。",
+                "再比较/组合的情况）。如果不需要拆解，返回只包含原问题的列表。"
+                "同时为每个子问题标注 query_type：要求列举/枚举某实体在语料库中"
+                "所有出现记录的问题（例如'列出所有...出场的剧情/章节标题'、'一共"
+                "出现在几个剧情里'）标为 enumerate 并填写 entity_name；其他正常"
+                "事实/剧情问题标为 standard。",
             ),
             ("human", state["question"]),
         ]
@@ -133,9 +146,50 @@ def decompose(state: GraphState) -> dict:
     # is_complex before it has "worked out" the decomposition in sub_questions,
     # making the two fields inconsistent in practice (observed: is_complex=False
     # alongside a correct multi-item sub_questions list).
-    sub_questions = result.sub_questions if len(result.sub_questions) > 1 else [state["question"]]
-    logger.info("decompose: question=%r -> %d sub-question(s): %s", state["question"], len(sub_questions), sub_questions)
-    return {"sub_questions": sub_questions}
+    if len(result.sub_questions) > 1:
+        raw_plans = result.sub_questions
+    else:
+        # Not complex -- always use the original raw question text (see
+        # comment above), but still keep whatever query_type/entity_name the
+        # model assigned to its single sub-question, since that classification
+        # is meaningful even for a non-decomposed question.
+        single = result.sub_questions[0] if result.sub_questions else None
+        raw_plans = [
+            SubQuestionPlanSchema(
+                question=state["question"],
+                query_type=single.query_type if single else "standard",
+                entity_name=single.entity_name if single else "",
+            )
+        ]
+    plans: list[SubQuestionPlan] = [
+        {"question": p.question, "query_type": p.query_type, "entity_name": p.entity_name} for p in raw_plans
+    ]
+    sub_questions = [p["question"] for p in plans]
+    logger.info(
+        "decompose: question=%r -> %d sub-question(s): %s",
+        state["question"],
+        len(plans),
+        [(p["question"], p["query_type"], p["entity_name"]) for p in plans],
+    )
+    return {"sub_questions": sub_questions, "sub_question_plans": plans}
+
+
+def solve_enumerate_subquestion(plan: SubQuestionPlan) -> tuple[str, list[dict]]:
+    """query_type='enumerate': exhaustive keyword scan (retrieval.py's
+    enumerate_by_keyword) instead of the Self-RAG subgraph's top-K search --
+    see SubQuestionPlan's schema docstring for why top-K misses most real
+    occurrences for this class of question. Deterministic formatting, no LLM
+    call: the user asked for a complete list, not a narrative summary."""
+    matches = get_retriever().enumerate_by_keyword(plan["entity_name"])
+    sources = sorted({m["source"] for m in matches})
+    if sources:
+        answer = f"「{plan['entity_name']}」在语料库中共出现在 {len(sources)} 条记录里：\n" + "\n".join(
+            f"- {s}" for s in sources
+        )
+    else:
+        answer = f"未在语料库中找到「{plan['entity_name']}」的相关记录。"
+    documents = [{"text": m["text"], "source": m["source"]} for m in matches]
+    return answer, documents
 
 
 def solve_subquestions(state: GraphState) -> dict:
@@ -143,8 +197,26 @@ def solve_subquestions(state: GraphState) -> dict:
     sub_answers = []
     sub_documents = []
     clarifications = []
-    for i, sub_q in enumerate(state["sub_questions"], 1):
+    for i, plan in enumerate(state["sub_question_plans"], 1):
+        sub_q = plan["question"]
         t0 = time.perf_counter()
+
+        if plan["query_type"] == "enumerate":
+            answer, documents = solve_enumerate_subquestion(plan)
+            elapsed = time.perf_counter() - t0
+            logger.info(
+                "solve_subquestions: [%d/%d] %r enumerate(%r) -> %d record(s) in %.2fs",
+                i,
+                len(state["sub_question_plans"]),
+                sub_q,
+                plan["entity_name"],
+                len(documents),
+                elapsed,
+            )
+            sub_answers.append(answer)
+            sub_documents.append(documents)
+            continue
+
         initial_state = {
             "question": sub_q,
             "route": "",
@@ -165,7 +237,7 @@ def solve_subquestions(state: GraphState) -> dict:
             logger.info(
                 "solve_subquestions: [%d/%d] %r needs clarification (%.1fs)",
                 i,
-                len(state["sub_questions"]),
+                len(state["sub_question_plans"]),
                 sub_q,
                 elapsed,
             )
@@ -177,7 +249,7 @@ def solve_subquestions(state: GraphState) -> dict:
         logger.info(
             "solve_subquestions: [%d/%d] %r done in %.1fs (%d doc(s))",
             i,
-            len(state["sub_questions"]),
+            len(state["sub_question_plans"]),
             sub_q,
             elapsed,
             len(result["documents"]),
@@ -263,6 +335,7 @@ def answer(question: str, history: list[Turn] | None = None, clarification_round
         "needs_clarification": False,
         "clarification_question": "",
         "sub_questions": [],
+        "sub_question_plans": [],
         "sub_answers": [],
         "sub_documents": [],
         "final_answer": "",

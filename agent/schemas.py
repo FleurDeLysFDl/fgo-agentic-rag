@@ -94,6 +94,34 @@ class RouteQuery(BaseModel):
     )
 
 
+class SubQuestionPlan(BaseModel):
+    question: str = Field(description="A self-contained single-hop sub-question.")
+    query_type: Literal["standard", "enumerate"] = Field(
+        description=(
+            "'enumerate' if the sub-question asks to list/count ALL occurrences "
+            "of an entity across the whole corpus (e.g. '列出所有...出场的剧情/"
+            "章节标题', '一共出现在多少个剧情里') -- these need an exhaustive "
+            "keyword scan over every record, not top-K similarity search, which "
+            "would only surface a handful of passages matching this specific "
+            "phrasing and silently miss most real occurrences. 'standard' for a "
+            "normal fact/lore question answerable from a few best-matching "
+            "passages."
+        )
+    )
+    entity_name: str = Field(
+        default="",
+        description=(
+            "For 'enumerate' type: the plain Chinese name exactly as written "
+            "in the ORIGINAL question, extracted verbatim -- do not translate, "
+            "annotate, or append an English/romanized name in parentheses "
+            "(e.g. use '伊阿宋', never '伊阿宋（Jason）'). This is matched as an "
+            "exact substring against corpus text, so anything added that isn't "
+            "in the source text will silently match nothing. Empty string for "
+            "'standard'."
+        ),
+    )
+
+
 class DecomposeQuery(BaseModel):
     is_complex: bool = Field(
         description=(
@@ -102,11 +130,12 @@ class DecomposeQuery(BaseModel):
             "separate lookups (e.g. a comparison)."
         )
     )
-    sub_questions: list[str] = Field(
+    sub_questions: list[SubQuestionPlan] = Field(
         description=(
             "If is_complex, a list of self-contained single-hop sub-questions "
             "(each answerable independently) that together cover the original "
-            "question. If not complex, a list containing just the original question."
+            "question, each with its own query_type. If not complex, a list "
+            "containing just the original question (still classify its query_type)."
         )
     )
 

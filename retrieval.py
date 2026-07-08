@@ -92,6 +92,17 @@ class HybridRetriever:
         ranked = sorted(range(len(scores)), key=lambda i: scores[i], reverse=True)[:top_k]
         return [(idx, scores[idx]) for idx in ranked]
 
+    def enumerate_by_keyword(self, keyword: str) -> list[dict]:
+        """Exhaustive substring scan across every record's source/text --
+        NOT a top-K similarity search. For "list every quest/chunk mentioning
+        X" questions, semantic/BM25 top-K retrieval only surfaces whichever
+        handful of records best match the query's specific phrasing and
+        silently misses most genuine occurrences (observed: two rephrasings
+        of "list every quest 伊阿宋 appears in" returned 6 and 2 records with
+        zero overlap, out of an unknown true total). A plain substring check
+        over ~4000 records is cheap enough to just do exhaustively instead."""
+        return [r for r in self.records if keyword in r["source"] or keyword in r["text"]]
+
     def rerank_text_for(self, record: dict) -> str:
         """Text fed to the cross-encoder for a candidate. Long records (the
         ones that would get silently truncated at RERANKER_MAX_LENGTH, losing

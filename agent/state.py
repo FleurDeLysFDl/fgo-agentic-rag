@@ -32,6 +32,12 @@ class Turn(TypedDict):
     content: str
 
 
+class SubQuestionPlan(TypedDict):
+    question: str
+    query_type: str  # "standard" or "enumerate"
+    entity_name: str
+
+
 class SubState(TypedDict):
     question: str
     route: str
@@ -53,6 +59,7 @@ class GraphState(TypedDict):
     needs_clarification: bool
     clarification_question: str
     sub_questions: list[str]
+    sub_question_plans: list[SubQuestionPlan]
     sub_answers: list[str]
     sub_documents: list[list[Document]]
     final_answer: str
