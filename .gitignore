@@ -17,3 +17,4 @@ chat_history/
 .tmp/
 .claude/
 eval/recall_results.log
+eval/scenario_results.log

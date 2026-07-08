@@ -1,15 +1,18 @@
 """Recall@5 baseline evaluation for the hybrid retrieval pipeline.
 
-Runs each hand-written question in eval/questions.json through
-HybridRetriever.query_verbose(top_k=5) and checks whether the expected
-source document appears among the top-5 results. Every pipeline stage
-(dense search, BM25 search, RRF fusion, cross-encoder rerank) is printed
-so the run can be watched live.
+Runs each question in a questions file (default eval/questions.json, the
+25 hand-written/verified questions) through HybridRetriever.
+query_verbose(top_k=5) and checks whether the expected source document
+appears among the top-5 results. Every pipeline stage (dense search, BM25
+search, RRF fusion, cross-encoder rerank) is printed so the run can be
+watched live.
 
 Usage:
     python scripts/eval_recall.py
+    python scripts/eval_recall.py --questions eval/questions_bulk.json --log eval/recall_results_bulk.log
 """
 
+import argparse
 import json
 import sys
 from pathlib import Path
@@ -18,8 +21,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from retrieval import HybridRetriever
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
-QUESTIONS_PATH = ROOT_DIR / "eval" / "questions.json"
-LOG_PATH = ROOT_DIR / "eval" / "recall_results.log"
 
 SEP = "-" * 70
 
@@ -30,7 +31,10 @@ def make_tee(log_file):
     from Python instead of relying on shell redirection."""
 
     def tee(text: str = "") -> None:
-        print(text)
+        try:
+            print(text)
+        except UnicodeEncodeError:
+            print(text.encode(sys.stdout.encoding, errors="replace").decode(sys.stdout.encoding))
         log_file.write(text + "\n")
         log_file.flush()
 
@@ -44,10 +48,17 @@ def print_stage(tee, title: str, lines: list[str]) -> None:
 
 
 def main() -> None:
-    with QUESTIONS_PATH.open(encoding="utf-8") as f:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--questions", default=str(ROOT_DIR / "eval" / "questions.json"))
+    parser.add_argument("--log", default=str(ROOT_DIR / "eval" / "recall_results.log"))
+    args = parser.parse_args()
+    questions_path = Path(args.questions)
+    log_path = Path(args.log)
+
+    with questions_path.open(encoding="utf-8") as f:
         questions = json.load(f)
 
-    with LOG_PATH.open("w", encoding="utf-8") as log_file:
+    with log_path.open("w", encoding="utf-8") as log_file:
         tee = make_tee(log_file)
 
         tee("Loading retriever (embedding + reranker models, BM25 index, Qdrant)...")

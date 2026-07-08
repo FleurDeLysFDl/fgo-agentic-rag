@@ -1,0 +1,100 @@
+[
+  {
+    "id": "pronoun_no_context",
+    "category": "memory",
+    "description": "代词在没有任何历史时应该反问，而不是瞎猜是哪位从者",
+    "turns": ["她的宝具是什么？"],
+    "checks": [
+      {"turn": 0, "needs_clarification": true}
+    ]
+  },
+  {
+    "id": "pronoun_with_context",
+    "category": "memory",
+    "description": "给出具体从者形态后，追问代词应正确借助对话历史消解，不再反问",
+    "turns": [
+      "阿尔托莉雅·潘德拉贡(Lancer)的宝具是什么？",
+      "她的宝具阶级是什么？"
+    ],
+    "checks": [
+      {"turn": 0, "needs_clarification": false},
+      {"turn": 1, "needs_clarification": false, "answer_contains_any": ["A++"]}
+    ]
+  },
+  {
+    "id": "conflict_structured_ambiguous_name",
+    "category": "conflict_detection",
+    "description": "structured路由下同名多变体（宝具阶级不同）应该反问而不是混合作答",
+    "turns": ["贞德的宝具阶级是什么？"],
+    "checks": [
+      {"turn": 0, "needs_clarification": true}
+    ]
+  },
+  {
+    "id": "round_limit_backstop",
+    "category": "conflict_detection",
+    "description": "反问一轮之后，下一轮必须强制给出答案，不能再反问第二次",
+    "turns": [
+      "贞德的宝具阶级是什么？",
+      "archer"
+    ],
+    "checks": [
+      {"turn": 0, "needs_clarification": true},
+      {"turn": 1, "needs_clarification": false}
+    ]
+  },
+  {
+    "id": "no_false_conflict_on_lore",
+    "category": "conflict_detection",
+    "description": "叙事类问题不应该因为多个文档语气/侧重点不同就被误判为冲突",
+    "turns": ["美狄亚和伊阿宋的关系是什么？"],
+    "checks": [
+      {"turn": 0, "needs_clarification": false}
+    ]
+  },
+  {
+    "id": "enumerate_routing_positive",
+    "category": "enumerate",
+    "description": "\"列出所有...剧情\"这类问题应该被正确分类为query_type=enumerate",
+    "turns": ["列出所有伊阿宋出场过的剧情"],
+    "checks": [
+      {"turn": 0, "query_type_any": "enumerate"}
+    ]
+  },
+  {
+    "id": "enumerate_routing_negative",
+    "category": "enumerate",
+    "description": "普通事实问题不应该被误分类为enumerate",
+    "turns": ["伊阿宋的出处是什么？"],
+    "checks": [
+      {"turn": 0, "query_type_all": "standard"}
+    ]
+  },
+  {
+    "id": "structured_fact_precise",
+    "category": "routing",
+    "description": "明确指定职阶的数值类问题应该给出精确答案（来自structured路由）",
+    "turns": ["阿尔托莉雅·潘德拉贡(Lancer)的稀有度是多少星？"],
+    "checks": [
+      {"turn": 0, "needs_clarification": false, "answer_contains_any": ["5星", "5 星", "五星"]}
+    ]
+  },
+  {
+    "id": "multi_hop_comparison",
+    "category": "routing",
+    "description": "涉及两个具体从者形态的对比问题应该被正确拆解为多个子问题",
+    "turns": ["阿尔托莉雅·潘德拉贡(Lancer)和贞德(Archer)的宝具阶级哪个更高？"],
+    "checks": [
+      {"turn": 0, "min_sub_questions": 2}
+    ]
+  },
+  {
+    "id": "no_info_honest_answer",
+    "category": "robustness",
+    "description": "语料库里不存在的实体应该诚实说找不到，不能编造具体数值/阶级",
+    "turns": ["从者「测试专用虚构名字暴风蟹」的宝具阶级是什么？"],
+    "checks": [
+      {"turn": 0, "answer_not_contains_any": ["A++", "A+", "EX"]}
+    ]
+  }
+]
