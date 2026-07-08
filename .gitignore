@@ -6,6 +6,7 @@ data/raw/
 data/wiki_raw/
 data/quest_raw/
 data/servants.db
+data/conversations.db
 data/corpus/
 data/summary_cache.jsonl
 chroma_db/

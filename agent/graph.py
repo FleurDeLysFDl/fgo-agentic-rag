@@ -20,6 +20,13 @@ resolve_question stops asking and commits to a best-effort interpretation,
 guaranteeing the conversation converges on an answer instead of narrowing
 forever.
 
+history_summary/recent_turns should come from agent/memory.py's
+ConversationMemory.get_context() -- a bounded view (recent turns verbatim,
+everything older folded into a running LLM summary), not the raw growing
+transcript. Both flow down into SubState too, so subgraph.py's generate()
+sees conversation context directly when producing the actual answer text,
+not just resolve_question's pronoun-resolution pass.
+
 decompose also assigns each sub-question a query_type (agent/schemas.py's
 SubQuestionPlan): 'enumerate' routes straight to an exhaustive keyword scan
 (solve_enumerate_subquestion) instead of the Self-RAG subgraph's top-K
@@ -42,6 +49,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from langgraph.graph import END, StateGraph
 
 from agent.llm import get_llm
+from agent.memory import format_history
 from agent.retriever_singleton import get_retriever
 from agent.schemas import DecomposeQuery, ResolvedQuestion, SubQuestionPlan as SubQuestionPlanSchema
 from agent.state import MAX_CLARIFICATION_ROUNDS, GraphState, SubQuestionPlan, Turn
@@ -60,10 +68,7 @@ def _get_subgraph():
 
 
 def resolve_question(state: GraphState) -> dict:
-    history = state.get("history") or []
-    history_text = "\n".join(
-        f"{'用户' if turn['role'] == 'user' else '助手'}：{turn['content']}" for turn in history
-    )
+    history_text = format_history(state.get("history_summary", ""), state.get("recent_turns") or [])
     clarification_rounds = state.get("clarification_rounds", 0)
 
     if clarification_rounds >= MAX_CLARIFICATION_ROUNDS:
@@ -229,6 +234,8 @@ def solve_subquestions(state: GraphState) -> dict:
             "needs_clarification": False,
             "clarification_question": "",
             "clarification_rounds": state.get("clarification_rounds", 0),
+            "history_summary": state.get("history_summary", ""),
+            "recent_turns": state.get("recent_turns") or [],
         }
         result = subgraph.invoke(initial_state)
         elapsed = time.perf_counter() - t0
@@ -319,18 +326,28 @@ def build_graph():
     return graph.compile()
 
 
-def answer(question: str, history: list[Turn] | None = None, clarification_rounds: int = 0) -> dict:
+def answer(
+    question: str,
+    history_summary: str = "",
+    recent_turns: list[Turn] | None = None,
+    clarification_rounds: int = 0,
+) -> dict:
+    """history_summary/recent_turns should come from ConversationMemory.
+    get_context() (agent/memory.py) -- already bounded, not a raw growing
+    transcript."""
     t0 = time.perf_counter()
     logger.info(
-        "answer: question=%r history_len=%d clarification_rounds=%d",
+        "answer: question=%r recent_turns=%d has_summary=%s clarification_rounds=%d",
         question,
-        len(history or []),
+        len(recent_turns or []),
+        bool(history_summary),
         clarification_rounds,
     )
     graph = build_graph()
     initial_state: GraphState = {
         "question": question,
-        "history": history or [],
+        "history_summary": history_summary,
+        "recent_turns": recent_turns or [],
         "clarification_rounds": clarification_rounds,
         "needs_clarification": False,
         "clarification_question": "",

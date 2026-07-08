@@ -18,6 +18,7 @@ QUEST_SCRIPTS_DIR = QUEST_RAW_DIR / "scripts_txt"
 QUEST_SCRIPTS_DIR_JP = QUEST_RAW_DIR / "scripts_txt_jp"
 CORPUS_DIR = DATA_DIR / "corpus"
 SERVANTS_DB_PATH = DATA_DIR / "servants.db"
+CONVERSATIONS_DB_PATH = DATA_DIR / "conversations.db"
 QDRANT_PATH = DATA_DIR / "qdrant_local"
 QDRANT_COLLECTION = "servants_corpus"
 

@@ -48,6 +48,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from langgraph.graph import END, StateGraph
 
 from agent.llm import get_llm
+from agent.memory import format_history
 from agent.retriever_singleton import get_retriever
 from agent.schemas import (
     ConflictCheck,
@@ -242,17 +243,24 @@ def transform_query(state: SubState) -> dict:
 
 def generate(state: SubState) -> dict:
     llm = get_llm(temperature=0.3)
+    # Conversation context is for tone/continuity only (e.g. not re-introducing
+    # a servant already discussed, matching how the user phrased things) --
+    # the answer's actual facts must still come only from `documents`, so this
+    # is explicitly scoped in the prompt rather than left ambiguous.
+    history_text = format_history(state.get("history_summary", ""), state.get("recent_turns") or [])
+    history_block = f"\n\n对话历史（仅用于保持语气/避免重复，不要作为事实依据）：\n{history_text}" if history_text else ""
     if state["documents"]:
         context = "\n\n---\n\n".join(f"[来源：{d['source']}]\n{d['text']}" for d in state["documents"])
         prompt = (
             "请仅根据下面提供的资料回答问题，不要编造资料中没有的内容。"
-            "回答完给出引用的来源名称。\n\n"
+            "回答完给出引用的来源名称。"
+            f"{history_block}\n\n"
             f"资料：\n{context}\n\n问题：{state['question']}"
         )
     else:
         prompt = (
             "没有检索到与问题相关的资料。请直接告知用户无法在现有语料库中找到"
-            f"关于这个问题的可靠信息，不要编造答案。\n\n问题：{state['question']}"
+            f"关于这个问题的可靠信息，不要编造答案。{history_block}\n\n问题：{state['question']}"
         )
     result = llm.invoke([("human", prompt)])
     logger.info(
@@ -371,5 +379,7 @@ def run_single_hop(question: str) -> dict:
         "needs_clarification": False,
         "clarification_question": "",
         "clarification_rounds": 0,
+        "history_summary": "",
+        "recent_turns": [],
     }
     return subgraph.invoke(initial_state)

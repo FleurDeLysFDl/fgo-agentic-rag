@@ -50,11 +50,19 @@ class SubState(TypedDict):
     needs_clarification: bool
     clarification_question: str
     clarification_rounds: int
+    history_summary: str
+    recent_turns: list[Turn]
 
 
 class GraphState(TypedDict):
     question: str
-    history: list[Turn]
+    # Bounded conversation context (agent/memory.py's ConversationMemory),
+    # not the raw unbounded transcript: history_summary condenses everything
+    # older than the last few turns, recent_turns are those last few turns
+    # verbatim. Both flow down into SubState so generate() can see them too,
+    # not just resolve_question.
+    history_summary: str
+    recent_turns: list[Turn]
     clarification_rounds: int
     needs_clarification: bool
     clarification_question: str

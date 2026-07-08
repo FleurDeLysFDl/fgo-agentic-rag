@@ -3,14 +3,24 @@
 Usage:
     streamlit run app.py
 
-Multi-turn: each question is sent along with the prior conversation
-(st.session_state.history) so the agent can resolve references like "她的
-宝具是什么" against whatever servant was just discussed (agent.graph.
-resolve_question). If a question is ambiguous even with that history -- or a
-structured lookup matches more than one servant variant -- the agent asks a
-clarifying question instead of guessing; that comes back as a normal
-assistant message (result["needs_clarification"]), so just answering it in
-the next turn continues the same conversation.
+Multi-turn, with real memory management (agent/memory.py's ConversationMemory)
+rather than just an unbounded in-memory list:
+  - persisted to SQLite (data/conversations.db), so the conversation survives
+    a page refresh or the app process restarting -- not just session_state.
+  - bounded: only the last few turns are sent verbatim; anything older is
+    folded into a running LLM-generated summary instead of being resent in
+    full every turn, so prompt size doesn't grow without bound as the
+    conversation gets long.
+  - actually used downstream: both resolve_question (to rewrite references
+    like "她的宝具是什么" into a self-contained question) and generate() (for
+    tone/continuity when producing the answer) see this bounded context, not
+    just a single preprocessing step.
+
+If a question is ambiguous even with that context -- or retrieved documents
+disagree with each other -- the agent asks a clarifying question instead of
+guessing; that comes back as a normal assistant message
+(result["needs_clarification"]), so just answering it in the next turn
+continues the same conversation.
 
 Pipeline trace (routing decisions, retrieval hit counts, grading judgments,
 retries, timings) is printed to the console/terminal running `streamlit run`
@@ -39,32 +49,40 @@ logging.basicConfig(
 logging.getLogger("agent").setLevel(logging.INFO)
 
 from agent.graph import answer
+from agent.memory import ConversationMemory
+
+# Single-user local app, one persistent conversation thread -- no login/
+# multi-tenant session model, so a fixed id is enough to give the whole
+# conversation durable identity across restarts.
+memory = ConversationMemory(session_id="default")
 
 st.set_page_config(page_title="FGO Agentic RAG", page_icon="⚔️")
 st.title("⚔️ FGO Agentic RAG")
 st.caption(
     "混合检索（BM25+bge-m3+RRF+重排）+ 结构化数据库查询 + LangGraph Self-RAG 多轮问答"
-    "（带上下文记忆；信息不足或从者形态有歧义时会反问）"
+    "（持久化+有界的对话记忆；信息不足或资料冲突时会反问）"
 )
 
-if "history" not in st.session_state:
-    st.session_state.history = []  # list of {"role": "user"/"assistant", "content": str}
 if "turn_details" not in st.session_state:
-    st.session_state.turn_details = []  # parallel to history; None except for non-clarification assistant turns
+    # Parallel to memory.load_history(); None except for non-clarification
+    # assistant turns. Rebuilt fresh each process start padded to match
+    # whatever was already persisted -- turns from a prior run just won't
+    # have an expandable "sources" section, only ones added this run will.
+    st.session_state.turn_details = [None] * len(memory.load_history())
 
 if st.button("清空对话"):
-    st.session_state.history = []
+    memory.clear()
     st.session_state.turn_details = []
     st.rerun()
 
 
-def clarification_streak() -> int:
+def clarification_streak(history: list[dict], turn_details: list[dict | None]) -> int:
     """How many trailing assistant turns in a row were clarification-only
-    (turn_details is None), i.e. asked without ever landing on a real answer.
+    (details is None), i.e. asked without ever landing on a real answer.
     Passed to answer() so it knows when to stop asking and commit to a
     best-effort interpretation instead (agent.state.MAX_CLARIFICATION_ROUNDS)."""
     streak = 0
-    for turn, details in zip(reversed(st.session_state.history), reversed(st.session_state.turn_details)):
+    for turn, details in zip(reversed(history), reversed(turn_details)):
         if turn["role"] != "assistant":
             continue
         if details is not None:
@@ -92,32 +110,34 @@ def render_details(details: dict) -> None:
                 st.markdown("_（未检索到相关资料）_")
 
 
-for i, turn in enumerate(st.session_state.history):
+history = memory.load_history()
+for i, turn in enumerate(history):
     with st.chat_message(turn["role"]):
         st.write(turn["content"])
-        details = st.session_state.turn_details[i]
+        details = st.session_state.turn_details[i] if i < len(st.session_state.turn_details) else None
         if details:
             render_details(details)
 
 question = st.chat_input("输入关于FGO从者的问题，可以是追问（例如“她的宝具是什么”）")
 if question:
-    st.session_state.history.append({"role": "user", "content": question})
+    streak = clarification_streak(history, st.session_state.turn_details)
+    # get_context() BEFORE appending the current question -- it's the prior
+    # turns the agent uses to resolve references in `question`, not
+    # including `question` itself.
+    history_summary, recent_turns = memory.get_context()
+
+    memory.append_turn("user", question)
     st.session_state.turn_details.append(None)
     with st.chat_message("user"):
         st.write(question)
 
     with st.chat_message("assistant"):
         with st.spinner("检索并生成回答中..."):
-            # history excludes the question just appended above -- it's the
-            # prior turns the agent uses to resolve references in `question`.
-            # clarification_streak() is computed before that append too (it
-            # walks st.session_state.history/turn_details, both already
-            # updated above) -- fine either way since the just-appended user
-            # turn is skipped by the role check inside it.
             result = answer(
                 question,
-                history=st.session_state.history[:-1],
-                clarification_rounds=clarification_streak(),
+                history_summary=history_summary,
+                recent_turns=recent_turns,
+                clarification_rounds=streak,
             )
         st.write(result["final_answer"])
 
@@ -130,5 +150,5 @@ if question:
             }
             render_details(details)
 
-    st.session_state.history.append({"role": "assistant", "content": result["final_answer"]})
+    memory.append_turn("assistant", result["final_answer"])
     st.session_state.turn_details.append(details)
