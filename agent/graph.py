@@ -35,6 +35,13 @@ would only surface a handful of matches for this specific phrasing and miss
 most real occurrences -- top-K similarity search and "find every occurrence"
 are fundamentally different operations, not a matter of tuning k.
 
+Before decomposing, decompose also resolves any known fan nickname/alternate
+transliteration in the question to the corpus's own canonical title
+(agent/aliases.py, data/servant_aliases.json), so a question like "红A的宝具
+是什么" is split/classified using "卫宫" -- the name the corpus and
+structured lookup actually recognize -- instead of a nickname that matches
+nothing.
+
 Usage (CLI):
     python -m agent.graph "阿尔托莉雅和贞德的宝具阶级哪个更高？"
 """
@@ -48,6 +55,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from langgraph.graph import END, StateGraph
 
+from agent.aliases import resolve_aliases
 from agent.llm import get_llm
 from agent.memory import format_history
 from agent.retriever_singleton import get_retriever
@@ -130,6 +138,11 @@ def resolve_question(state: GraphState) -> dict:
 
 
 def decompose(state: GraphState) -> dict:
+    # Resolve fan nicknames/alternate transliterations (e.g. "红A", "Jalter")
+    # to the corpus's own canonical title (agent/aliases.py) before decomposing,
+    # so the model splits/classifies sub-questions using a name the corpus
+    # and downstream structured lookup actually recognize.
+    question = resolve_aliases(state["question"])
     llm = get_llm().with_structured_output(DecomposeQuery)
     result: DecomposeQuery = llm.invoke(
         [
@@ -143,7 +156,7 @@ def decompose(state: GraphState) -> dict:
                 "出现在几个剧情里'）标为 enumerate 并填写 entity_name；其他正常"
                 "事实/剧情问题标为 standard。",
             ),
-            ("human", state["question"]),
+            ("human", question),
         ]
     )
     # Trust sub_questions directly rather than gating on is_complex: structured
@@ -154,25 +167,30 @@ def decompose(state: GraphState) -> dict:
     if len(result.sub_questions) > 1:
         raw_plans = result.sub_questions
     else:
-        # Not complex -- always use the original raw question text (see
-        # comment above), but still keep whatever query_type/entity_name the
-        # model assigned to its single sub-question, since that classification
-        # is meaningful even for a non-decomposed question.
+        # Not complex -- always use the original (alias-resolved) question
+        # text (see comment above), but still keep whatever query_type/
+        # entity_name the model assigned to its single sub-question, since
+        # that classification is meaningful even for a non-decomposed question.
         single = result.sub_questions[0] if result.sub_questions else None
         raw_plans = [
             SubQuestionPlanSchema(
-                question=state["question"],
+                question=question,
                 query_type=single.query_type if single else "standard",
                 entity_name=single.entity_name if single else "",
             )
         ]
     plans: list[SubQuestionPlan] = [
-        {"question": p.question, "query_type": p.query_type, "entity_name": p.entity_name} for p in raw_plans
+        {
+            "question": resolve_aliases(p.question),
+            "query_type": p.query_type,
+            "entity_name": resolve_aliases(p.entity_name) if p.entity_name else p.entity_name,
+        }
+        for p in raw_plans
     ]
     sub_questions = [p["question"] for p in plans]
     logger.info(
         "decompose: question=%r -> %d sub-question(s): %s",
-        state["question"],
+        question,
         len(plans),
         [(p["question"], p["query_type"], p["entity_name"]) for p in plans],
     )
