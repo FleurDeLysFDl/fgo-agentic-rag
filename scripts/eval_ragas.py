@@ -14,8 +14,10 @@ answer), and scores the run with four RAGAS metrics:
 
 Usage:
     python scripts/eval_ragas.py
+    python scripts/eval_ragas.py --questions eval/questions_bulk_content.json
 """
 
+import argparse
 import json
 import sys
 from pathlib import Path
@@ -40,12 +42,12 @@ from agent.llm import get_llm
 from agent.subgraph import run_single_hop
 from config import LLM_API_BASE, LLM_API_KEY
 
-QUESTIONS_PATH = Path(__file__).resolve().parent.parent / "eval" / "questions.json"
-RESULTS_PATH = Path(__file__).resolve().parent.parent / ".tmp" / "ragas_results.json"
+ROOT_DIR = Path(__file__).resolve().parent.parent
+RESULTS_PATH = ROOT_DIR / ".tmp" / "ragas_results.json"
 
 
-def build_samples() -> list[dict]:
-    questions = json.loads(QUESTIONS_PATH.read_text(encoding="utf-8"))
+def build_samples(questions_path: Path) -> list[dict]:
+    questions = json.loads(questions_path.read_text(encoding="utf-8"))
     samples = []
     for q in questions:
         result = run_single_hop(q["question"])
@@ -62,8 +64,14 @@ def build_samples() -> list[dict]:
 
 
 def main() -> None:
-    print(f"Running {json.loads(QUESTIONS_PATH.read_text(encoding='utf-8')).__len__()} questions through the subgraph...")
-    samples = build_samples()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--questions", default=str(ROOT_DIR / "eval" / "questions.json"))
+    args = parser.parse_args()
+    questions_path = Path(args.questions)
+
+    questions = json.loads(questions_path.read_text(encoding="utf-8"))
+    print(f"Running {len(questions)} questions through the subgraph...")
+    samples = build_samples(questions_path)
 
     ragas_llm = LangchainLLMWrapper(get_llm())
     ragas_embeddings = LangchainEmbeddingsWrapper(
