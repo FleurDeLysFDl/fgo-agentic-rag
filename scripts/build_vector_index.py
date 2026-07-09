@@ -41,8 +41,6 @@ Usage:
 """
 
 import argparse
-import hashlib
-import json
 import sys
 from pathlib import Path
 
@@ -52,36 +50,12 @@ from sentence_transformers import SentenceTransformer
 from tqdm import tqdm
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from config import DATA_DIR, EMBEDDING_MODEL_NAME, QDRANT_COLLECTION, QDRANT_PATH
+from config import EMBEDDING_MODEL_NAME, QDRANT_COLLECTION, QDRANT_PATH
+from corpus_text import _text_hash, load_summary_cache, summary_or_text_for
 from wiki_raw_loader import load_records as load_wiki_records
 from quest_raw_loader import load_records as load_quest_records
 
 BATCH_SIZE = 32
-SUMMARY_CACHE_PATH = DATA_DIR / "summary_cache.jsonl"
-
-
-def _text_hash(text: str) -> str:
-    return hashlib.sha256(text.encode("utf-8")).hexdigest()
-
-
-def load_summary_cache() -> dict:
-    cache = {}
-    if SUMMARY_CACHE_PATH.exists():
-        with SUMMARY_CACHE_PATH.open(encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                entry = json.loads(line)
-                cache[entry["chunk_id"]] = entry
-    return cache
-
-
-def embedding_text_for(record: dict, summary_cache: dict) -> str:
-    cached = summary_cache.get(record["chunk_id"])
-    if cached and cached.get("text_hash") == _text_hash(record["text"]):
-        return cached["summary"]
-    return record["text"]
 
 
 def main() -> None:
@@ -137,7 +111,7 @@ def main() -> None:
         for start in range(0, len(records), BATCH_SIZE):
             batch = records[start : start + BATCH_SIZE]
             ids = list(range(start, start + len(batch)))
-            target_texts = [embedding_text_for(r, summary_cache) for r in batch]
+            target_texts = [summary_or_text_for(r, summary_cache) for r in batch]
             target_hashes = [_text_hash(t) for t in target_texts]
 
             existing_hashes: dict[int, str | None] = {}

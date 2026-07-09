@@ -23,6 +23,7 @@ from rank_bm25 import BM25Okapi
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from config import DATA_DIR
+from corpus_text import index_text_for, load_summary_cache
 from wiki_raw_loader import load_records as load_wiki_records
 from quest_raw_loader import load_records as load_quest_records
 
@@ -38,7 +39,8 @@ def main() -> None:
     quest_records = load_quest_records()
     records = wiki_records + quest_records
 
-    tokenized_corpus = [tokenize(r["text"]) for r in records]
+    summary_cache = load_summary_cache()
+    tokenized_corpus = [tokenize(index_text_for(r, summary_cache)) for r in records]
     bm25 = BM25Okapi(tokenized_corpus)
 
     with BM25_INDEX_PATH.open("wb") as f:

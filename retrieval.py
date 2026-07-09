@@ -11,8 +11,6 @@ Usage (library):
 """
 
 import argparse
-import hashlib
-import json
 import pickle
 
 import jieba
@@ -26,9 +24,9 @@ from config import (
     QDRANT_PATH,
     RERANKER_MODEL_NAME,
 )
+from corpus_text import index_text_for, load_summary_cache
 
 BM25_INDEX_PATH = DATA_DIR / "bm25_index.pkl"
-SUMMARY_CACHE_PATH = DATA_DIR / "summary_cache.jsonl"
 RRF_K = 60  # standard RRF damping constant
 DENSE_TOP_K = 20
 BM25_TOP_K = 20
@@ -39,26 +37,6 @@ FUSED_TOP_K = 20  # candidates sent into the reranker
 # to 8192 tokens per pair -- 256x the attention cost of a 512-token pair --
 # which made every query take minutes instead of seconds.
 RERANKER_MAX_LENGTH = 512
-
-
-def _text_hash(text: str) -> str:
-    return hashlib.sha256(text.encode("utf-8")).hexdigest()
-
-
-def load_summary_cache() -> dict:
-    """Same cache scripts/summarize_corpus.py writes and build_vector_index.py
-    embeds -- reused here so long candidates get reranked against their
-    entity-dense summary instead of a truncated slice of raw text."""
-    cache = {}
-    if SUMMARY_CACHE_PATH.exists():
-        with SUMMARY_CACHE_PATH.open(encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                entry = json.loads(line)
-                cache[entry["chunk_id"]] = entry
-    return cache
 
 
 class HybridRetriever:
@@ -104,17 +82,11 @@ class HybridRetriever:
         return [r for r in self.records if keyword in r["source"] or keyword in r["text"]]
 
     def rerank_text_for(self, record: dict) -> str:
-        """Text fed to the cross-encoder for a candidate. Long records (the
-        ones that would get silently truncated at RERANKER_MAX_LENGTH, losing
-        whatever content falls past the cutoff) use their cached LLM summary
-        instead -- same summary already used for dense embedding, prefixed
-        with the title/source so the reranker sees which entity/chapter it's
-        looking at. Short records use the full text as-is (nothing to gain
-        from summarizing, and nothing gets truncated)."""
-        cached = self.summary_cache.get(record["chunk_id"])
-        if cached and cached.get("text_hash") == _text_hash(record["text"]):
-            return f"{record['source']}\n{cached['summary']}"
-        return record["text"]
+        """Text fed to the cross-encoder for a candidate -- same title-prefixed,
+        summary-or-full-text target used for BM25/dense indexing (see
+        corpus_text.index_text_for), so the reranker sees the same title/entity
+        signal that got the candidate into the top-20 in the first place."""
+        return index_text_for(record, self.summary_cache)
 
     @staticmethod
     def rrf_fuse(*rankings: list[tuple[int, float]], k: int = RRF_K) -> list[int]:
